@@ -1,0 +1,16 @@
+if SHIELD_SOFLEEZ_LEFT
+
+config ZMK_KEYBOARD_NAME
+    default "sofleez"
+
+config ZMK_SPLIT_ROLE_CENTRAL
+    default y
+
+endif # SHIELD_SOFLEEZ_LEFT
+
+if SHIELD_SOFLEEZ_LEFT || SHIELD_SOFLEEZ_RIGHT
+
+config ZMK_SPLIT
+    default y
+
+endif # SHIELD_SOFLEEZ_LEFT || SHIELD_SOFLEEZ_RIGHT

@@ -33,6 +33,7 @@
               pkgs.ninja
 
               pkgs.just
+              pkgs.protobuf
               pkgs.yq # Make sure yq resolves to python-yq.
             ];
 

@@ -7,9 +7,129 @@ on:
       - build.yaml
 
 jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    name: Fetch Build Keyboards
+    outputs:
+      build_matrix: ${{ env.build_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch Build Matrix
+        run: |
+          echo "build_matrix=$(yq -oj -I0 build.yaml)" >> $GITHUB_ENV
+          yq -oj build.yaml
+
   build:
-    uses: urob/zmk-actions/.github/workflows/build-user-config.yml@main
-    with:
-      # Set to 'gnuarmemb' (fastest), 'zephyr' or, 'zephyr-full' (most
-      # compatible). ZMK Studio requires 'zephyr-full'.
-      toolchain: zephyr-full
+    runs-on: ubuntu-24.04
+    needs: matrix
+    name: Build ZMK firmware
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.build_matrix) }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up West and Zephyr SDK
+        uses: urob/zmk-actions/setup-sdk@v12.0.0
+        with:
+          toolchain: zephyr
+
+      - name: Add protoc for ZMK Studio
+        if: ${{ contains(matrix.cmake-args, 'CONFIG_ZMK_STUDIO=y') }}
+        run: |
+          nix profile install nixpkgs#protobuf
+          echo "$HOME/.nix-profile/bin" >> $GITHUB_PATH
+
+      - name: Pull in ZMK and Zephyr modules
+        uses: urob/zmk-actions/setup-zmk@v12.0.0
+        id: setup-zmk
+        with:
+          config: config
+          always-update-west: true
+
+      - name: Prepare variables
+        shell: bash -x {0}
+        env:
+          board: ${{ matrix.board }}
+          shield: ${{ matrix.shield }}
+          artifact_name: ${{ matrix.artifact-name }}
+          snippet: ${{ matrix.snippet }}
+        run: |
+          if [ -e zephyr/module.yml ]; then
+            export zmk_load_arg=" -DZMK_EXTRA_MODULES='${GITHUB_WORKSPACE}'"
+          fi
+
+          if [ -n "${snippet}" ]; then
+            extra_west_args="-S \"${snippet}\""
+          fi
+
+          echo "build_dir=$(mktemp -p ${RUNNER_TEMP} -d build.XXXXXXXXXX)" >> $GITHUB_ENV
+          echo "zmk_src_dir=${{ steps.setup-zmk.outputs.zmk-src-dir }}" >> $GITHUB_ENV
+          echo "extra_west_args=${extra_west_args}" >> $GITHUB_ENV
+          echo "extra_cmake_args=${shield:+-DSHIELD=\"$shield\"}${zmk_load_arg}" >> $GITHUB_ENV
+          echo "display_name=${shield:+$shield - }${board}" >> $GITHUB_ENV
+          echo "artifact_name=${artifact_name:-${shield:+$shield-}${board//\//_}-zmk}" >> $GITHUB_ENV
+
+      - name: West Build (${{ env.display_name }})
+        working-directory: ${{ steps.setup-zmk.outputs.workspace }}
+        shell: sh -x {0}
+        run: |
+          west build -s "${zmk_src_dir}" -d "${{ env.build_dir }}" -b "${{ matrix.board }}" \
+            ${{ env.extra_west_args }} -- -DZMK_CONFIG=$(realpath config) \
+            ${{ env.extra_cmake_args }} ${{ matrix.cmake-args }}
+
+      - name: ${{ env.display_name }} Kconfig file
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "${{ env.build_dir }}/zephyr/.config" ]; then
+            grep -v -e "^#" -e "^$" "${{ env.build_dir }}/zephyr/.config" | sort
+          else
+            echo "No Kconfig output"
+          fi
+
+      - name: ${{ env.display_name }} Devicetree file
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "${{ env.build_dir }}/zephyr/zephyr.dts" ]; then
+            cat "${{ env.build_dir }}/zephyr/zephyr.dts"
+          elif [ -f "${{ env.build_dir }}/zephyr/zephyr.dts.pre" ]; then
+            cat -s "${{ env.build_dir }}/zephyr/zephyr.dts.pre"
+          else
+            echo "No Devicetree output"
+          fi
+
+      - name: Rename artifacts
+        shell: sh -x {0}
+        run: |
+          mkdir "${{ env.build_dir }}/artifacts"
+          if [ -f "${{ env.build_dir }}/zephyr/zmk.uf2" ]; then
+            cp "${{ env.build_dir }}/zephyr/zmk.uf2" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.uf2"
+          elif [ -f "${{ env.build_dir }}/zephyr/zmk.bin" ]; then
+            cp "${{ env.build_dir }}/zephyr/zmk.bin" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.bin"
+          fi
+
+      - name: Archive (${{ env.display_name }})
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifact-${{ env.artifact_name }}
+          path: ${{ env.build_dir }}/artifacts
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Merge Output Artifacts
+    steps:
+      - name: Merge Artifacts
+        uses: actions/upload-artifact/merge@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware
+          pattern: artifact-*
+          delete-merged: true
